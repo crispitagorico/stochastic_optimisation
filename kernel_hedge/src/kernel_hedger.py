@@ -3,7 +3,7 @@ import torch
 import time
 import gc
 from scipy.optimize import minimize
-from utils import augment_with_time, Hoff_transform, batch_dyadic_partition, batch_dyadic_recovery
+from src.utils import augment_with_time, Hoff_transform, batch_dyadic_partition, batch_dyadic_recovery
 
 base_path = os.getcwd()
 
@@ -788,6 +788,7 @@ class SigKernelHedger:
 class SigKernelTrader:
     def __init__(self,
                  kernel_fn,
+                 risk_aversion,
                  device,
                  time_augment=True,
                  dyadic_order=0):
@@ -805,6 +806,8 @@ class SigKernelTrader:
 
         # Python options
         self.device = device
+        # Finance Quantities
+        self.risk_aversion = risk_aversion
         # Kernel quantities
         self.Kernel = kernel_fn
         self.time_augment = time_augment
@@ -825,7 +828,6 @@ class SigKernelTrader:
         self.alpha = None
         self.position = None
         self.pnl = None
-        self.lambda_reg = None
 
     def pre_fit(self, train_paths: torch.Tensor):
         """
@@ -864,7 +866,7 @@ class SigKernelTrader:
         # Xi: (batch_train, batch_train)
         self.Xi = self.eta2/self.eta2.shape[0]
 
-    def fit(self, lambda_reg, reg_type='L2', regularisation=0.0):
+    def fit(self, reg_type='L2', regularisation=0.0):
         """
         Calibrate the trading strategy.
         For calibration the sample size should be as large as possible to accurately approximate the empirical measure.
@@ -897,14 +899,13 @@ class SigKernelTrader:
         """
 
         batch = self.train_set.shape[0]
-        self.lambda_reg = lambda_reg
         self.regularisation = regularisation
 
         # Start stopwatch if verbose is True
         start = start = time.time()
 
         # Xi_final: (batch, 1)
-        Xi_final = (self.Xi @ torch.ones((batch, 1)).to(self.device))
+        Xi_final = (self.Xi @ torch.ones((batch, 1)).to(self.device).type(torch.float64))
         self.Xi_final = Xi_final
 
         ## Add regularisation
@@ -919,7 +920,7 @@ class SigKernelTrader:
         # Omega: (batch, batch)
         Omega = self.Xi @ self.Xi - (Xi_final @ Xi_final.T)/batch
         # alpha: (batch)
-        self.alpha = 0.5 * (torch.inverse(self.lambda_reg*Omega + self.regulariser) @ Xi_final).squeeze(-1)
+        self.alpha = 0.5 * (torch.inverse(self.risk_aversion*Omega + self.regulariser) @ Xi_final).squeeze(-1)
 
         print('Alpha Obtained: %s' % (time.time() - start))
 

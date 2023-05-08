@@ -3,7 +3,7 @@ from typing import Tuple
 import torch
 from tqdm import tqdm
 import gc
-from utils import Hoff_transform, compute_quadratic_var
+from src.utils import Hoff_transform, compute_quadratic_var
 
 base_path = os.getcwd()
 
