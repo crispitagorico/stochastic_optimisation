@@ -788,7 +788,6 @@ class SigKernelHedger:
 class SigKernelTrader:
     def __init__(self,
                  kernel_fn,
-                 risk_aversion,
                  device,
                  time_augment=True,
                  dyadic_order=0):
@@ -807,7 +806,7 @@ class SigKernelTrader:
         # Python options
         self.device = device
         # Finance Quantities
-        self.risk_aversion = risk_aversion
+        self.risk_aversion = None
         # Kernel quantities
         self.Kernel = kernel_fn
         self.time_augment = time_augment
@@ -866,7 +865,7 @@ class SigKernelTrader:
         # Xi: (batch_train, batch_train)
         self.Xi = self.eta2/self.eta2.shape[0]
 
-    def fit(self, reg_type='L2', regularisation=0.0):
+    def fit(self, risk_aversion, reg_type='L2', regularisation=0.0):
         """
         Calibrate the trading strategy.
         For calibration the sample size should be as large as possible to accurately approximate the empirical measure.
@@ -899,6 +898,7 @@ class SigKernelTrader:
         """
 
         batch = self.train_set.shape[0]
+        self.risk_aversion = risk_aversion
         self.regularisation = regularisation
 
         # Start stopwatch if verbose is True
