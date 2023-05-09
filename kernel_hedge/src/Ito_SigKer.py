@@ -9,8 +9,9 @@ base_path = os.getcwd()
 
 
 class ItoKer:
-    def __int__(self, dyadic_order=0):
+    def __init__(self, dyadic_order=0, verbose=True):
         self.dyadic_order = dyadic_order
+        self.verbose = verbose
 
     def compatibility_check(self, x: torch.Tensor, y: torch.Tensor):
         """
@@ -266,8 +267,8 @@ class ItoKer:
             return past + innovation
 
         ## Compute KGF
-
-        for s in tqdm(range(timesteps-1)):
+        not_verbose = not self.verbose
+        for s in tqdm(range(timesteps-1), disable=not_verbose):
             # Compute KGF[:, :, s + 1, t + 1] and KGF[:, :, t + 1, s + 1] when t < s
             for t in range(s):
                 KGF[:, :, s + 1, t + 1] = compute_next(s, t)
