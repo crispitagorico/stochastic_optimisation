@@ -40,7 +40,7 @@ class ItoKer:
         batch_X, batch_Y = X.shape[0], Y.shape[0]
 
         if batch_X <= max_batch and batch_Y <= max_batch:
-            K = self._compute_Gram(X, Y)
+            K = self._compute_Gram(X, Y, sym=sym)
 
         elif batch_X <= max_batch and batch_Y > max_batch:
             cutoff = int(batch_Y/2)
@@ -173,9 +173,11 @@ class ItoKer:
 
         return K, eta
 
-    def _compute_Gram(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def _compute_Gram(self, x: torch.Tensor, y: torch.Tensor, sym=False) -> torch.Tensor:
         """
         Compute the ItoKer Gram Matrix using only Stratonovich Integrals
+
+        !! Need to implement Sym !!
 
         Parameters
             ----------
