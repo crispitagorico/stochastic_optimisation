@@ -3,7 +3,7 @@ import torch
 import time
 import gc
 from scipy.optimize import minimize
-from src.utils import augment_with_time, Hoff_transform, batch_dyadic_partition, batch_dyadic_recovery
+from src.utils import augment_with_time, Hoff_transform, batch_dyadic_partition, batch_dyadic_recovery, compute_quadratic_var
 
 base_path = os.getcwd()
 
@@ -106,18 +106,42 @@ class KernelCompute:
 
         # dx : (batch_x, timesteps_x-1, d or d-1)
         # dx[i,s,k] = x[i,s+1,k] - x[i,s,k]
+        # dxx : (batch_x, timesteps_x-1, d or d-1, d or d-1)
+        # dxx[i, s, k, l] = d[(x_i)^k, (x_i)^l]_s
         if time_augmented:
             dx = X[..., 1:].diff(dim=1)
+            dy = Y[..., 1:].diff(dim=1)
+            dxx = compute_quadratic_var(X[..., 1:]).diff(dim=1)
         else:
             dx = X.diff(dim=1)
+            dy = Y.diff(dim=1)
+            dxx = compute_quadratic_var(X).diff(dim=1)
+
+        # K[i, j, s, t] = K(x_i, y_j)_{s,t}
+        K = self.compute_Gram(X, Y, sym=False)
 
         # eta : (batch_x, batch_y, timesteps_y, d or d-1)
         # eta[i,j,t,k] = eta_{x_i}(y_j|_{[0,t]}) = \int_0^1 K(X,Y)[i,j,s,t] dx[i,s,k]
         #              = \sum_{s=0}^{timesteps_x-1} K(X,Y)[i,j,s,t,*] dx[i,*,s,*,k]
-        eta = (self.compute_Gram(X, Y, sym=False)[..., :-1, :].unsqueeze(-1)*dx.unsqueeze(1).unsqueeze(3)).sum(dim=-3)
+        eta = (K[..., :-1, :].unsqueeze(-1)*dx.unsqueeze(1).unsqueeze(3)).sum(dim=-3)
+
+        # Eta correction term
+        # correction: (batch_x, batch_y, timesteps_y, d or d-1)
+        # correction[i, j, t, k] = \int_0^1 \int_0^t  K(X,Y)[i,j,s,r] ( \sum_{l=1}^d dxx[i,s,k,l] dy[j,r,l] )
+        #                        = \int_0^1 \int_0^t  K(X,Y)[i,j,s,r] (dxx[i,s] @ dy[j,r])[k]
+        #                        = \sum_{s=0}^{timesteps_x-1} \sum_{s=0}^{t-1} \sum_{l=1}^d  K(X,Y)[i,j,s,r] dxx[i,s,k,l] dy[j,r,l]
+        #                        = \sum_{s=0}^{timesteps_x-1} \sum_{r=0}^{t-1} \sum_{l=1}^d  K(X,Y)[i,j,s,r,*,*] dxx[i,*,s,*,k,l] dy[*,j,*,r,*,l]
+        correction = (K[..., :-1, :-1].unsqueeze(-1).unsqueeze(-2)*dxx.unsqueeze(1).unsqueeze(3)*dy.unsqueeze(0).unsqueeze(2).unsqueeze(4))
+        correction = correction.sum(dim=-1).cumsum(dim=3).sum(dim=2)
+        temp_size = list(correction.size())
+        temp_size[2] = 1
+        temp = torch.zeros(temp_size)
+        correction = torch.cat((temp, correction), 2)
+
+        # eta = eta - 0.5 * correction
 
         # Memory management
-        del dx
+        del dx, dxx, dy
         if X.device.type == 'cuda':
             torch.cuda.empty_cache()
             gc.collect()
@@ -265,28 +289,54 @@ class KernelCompute:
 
         """
 
+        # x_rev : (batch_x, timesteps_x-1, d or d-1)
         # dx : (batch_x, timesteps_x-1, d or d-1)
+        # dxx : (batch_x, timesteps_x-1, d or d-1, d or d-1)
         # dy : (batch_y, timesteps_y-1, d or d-1)
+        # x_rev[i,s,k] = x[i,-1,s] - x[i,s,k]
         # dx[i,s,k] = x[i,s+1,k] - x[i,s,k]
         # dy[j,t,k] = y[j,t+1,k] - y[j,t,k]
         if time_augmented:
+            x_rev = (X[..., -1, 1:].unsqueeze(-2) - X[..., 1:])[..., :-1, :]
             dx = X[..., 1:].diff(dim=1)
+            dxx = compute_quadratic_var(X[..., 1:]).diff(dim=1)
+            y_rev = (Y[..., -1, 1:].unsqueeze(-2) - Y[..., 1:])[..., :-1, :]
             dy = Y[..., 1:].diff(dim=1)
+            dyy = compute_quadratic_var(Y[..., 1:]).diff(dim=1)
         else:
+            x_rev = (X[..., -1, :].unsqueeze(-2) - X)[..., :-1, :]
             dx = X.diff(dim=1)
+            dxx = compute_quadratic_var(X).diff(dim=1)
+            y_rev = (Y[..., -1, :].unsqueeze(-2) - Y)[..., :-1, :]
             dy = Y.diff(dim=1)
+            dyy = compute_quadratic_var(Y).diff(dim=1)
 
         # dxdy : (batch_x, batch_y, timesteps_x-1, timesteps_y-1)
         # dxdy[i,j,s,t] = <dx[i,*,s,*],dy[*,j,*,t]>_{\R^d}
         dxdy = (dx.unsqueeze(1).unsqueeze(3)*dy.unsqueeze(0).unsqueeze(2)).sum(dim=-1)
 
+        # dxxdy, dyydx : (batch_x, batch_y, timesteps_x-1, timesteps_y-1)
+        # dxxdy[i,j,s,t] = \sum_{k, l = 1}^d dxx[i,*,s,*,k,l]dy[*,j,*,t,k,*]y_rev[*,j,*,t,*,l]
+        # dyydx[i,j,s,t] = \sum_{k, l = 1}^d x_rev[i,*,s,*,*,l]dx[i,*,s,*,k,*]dyy[*,j,*,t,k,l]
+        dxxdy = (dxx.unsqueeze(1).unsqueeze(3)*dy.unsqueeze(0).unsqueeze(2).unsqueeze(-1)*y_rev.unsqueeze(0).unsqueeze(2).unsqueeze(-2)).sum(dim=-1).sum(dim=-1)
+        dyydx = (x_rev.unsqueeze(1).unsqueeze(3).unsqueeze(-2)*dx.unsqueeze(1).unsqueeze(3).unsqueeze(-1)*dyy.unsqueeze(0).unsqueeze(2)).sum(dim=-1).sum(dim=-1)
+
+        # dxxdyy :  (batch_x, batch_y, timesteps_x-1, timesteps_y-1)
+        # dxxdyy[i,j,s,t] = \sum_{k, l = 1}^d dxx[i,*,s,*,k,l]dyy[*,j,*,t,k,l]
+        dxxdyy = (dxx.unsqueeze(1).unsqueeze(3)*dyy.unsqueeze(0).unsqueeze(2)).sum(dim=-1).sum(dim=-1)
+
+        correction = -0.5 * (dxxdy + dyydx) + 0.25*dxxdyy
+        # dxdy = dxdy + correction
+
         # eta_square: (batch_x, batch_y)
         # eta_square[i,j] = <eta_{x_i},eta_{y_j}>_{\Hs} = \int_0^1 \int_0^1 K(X,Y)[i,j,s,t] <dx[i,s],dy[j,t]>
         #                 = \sum_{s=0}^{timesteps_x-1} \sum_{t=0}^{timesteps_y-1} K(X,Y)[i,j,s,t] dxdy[i,j,s,t]
-        eta_square = (self.compute_Gram(X, Y, sym=sym)[..., :-1, :-1]*dxdy).sum(dim=(-2, -1))
+        G = self.compute_Gram(X, Y, sym=sym)
+        # print(G.shape)
+        eta_square = (G[..., :-1, :-1]*dxdy).sum(dim=(-2, -1))
 
         # Memory management
-        del dx, dy, dxdy
+        del dx, dy, dxdy, dxx, dyy, dyydx, dxxdy, dxxdyy, correction
         if X.device.type == 'cuda':
             torch.cuda.empty_cache()
             gc.collect()
@@ -425,7 +475,7 @@ class SigKernelHedger:
         # Xi: (batch_train, batch_train)
         self.Xi = self.eta2/self.eta2.shape[0]
 
-    def fit(self, reg_type='L2', regularisation=0.0):
+    def fit(self, regularisation=1e-8):
         """
         Calibrate the hedging strategy.
         For calibration the sample size should be as large as possible to accurately approximate the empirical measure.
@@ -433,10 +483,6 @@ class SigKernelHedger:
 
         Parameters
         ----------
-        reg_type: str = 'RKHS' or 'L2'
-            user will input which type of regularisation they want, either RKHS penalisation or L2 norm
-            default is 'RKHS'
-
         regularisation: float > 0
             the large the regularisation, the smaller the alpha's become and more stable the strategy
             often 10**(-3) to 10**(-10) is sensible range
@@ -460,21 +506,12 @@ class SigKernelHedger:
 
         # F: (batch, 1)
         F = self.payoff_fn(self.train_set).to(self.device)
-        # Xi_final: (batch, 1)
-        Xi_final = (self.Xi @ (F - self.pi_0))
-        self.Xi_final = Xi_final
-
-        ## Add regularisation
-        # Penalization in RKHS
-        if reg_type == 'RKHS':
-            self.regulariser = self.regularisation * self.Xi
-        # Penalization in L2 norm
-        if reg_type == 'L2':
-            self.regulariser = self.regularisation * torch.eye(self.Xi.shape[0]).to(self.device)
 
         ## Compute the weights
         # alpha: (batch)
-        self.alpha = (torch.inverse((self.Xi @ self.Xi) + self.regulariser) @ Xi_final).squeeze(-1)
+        # self.alpha = (torch.inverse((self.Xi @ self.Xi) + self.regulariser) @ Xi_final).squeeze(-1)
+        temp = torch.inverse(self.Xi/self.regularisation + 0.5*torch.eye(self.Xi.shape[0]).to(self.device))
+        self.alpha = (temp @ (F - self.pi_0)).squeeze(-1)
 
         print('Alpha Obtained: %s' % (time.time() - start))
 
@@ -527,7 +564,7 @@ class SigKernelHedger:
 
         # position : (batch_y, timesteps_y_dyadic, d)
         # i.e. position[j,t,k] = \phi^k(y_j|_{0,t}) = (1/batch_x) * \sum_i alpha[i,*,*,*] eta[i,j,t,k]
-        self.position = (self.alpha.unsqueeze(1).unsqueeze(2).unsqueeze(3) * self.eta).mean(dim=0)
+        self.position = (self.alpha.unsqueeze(1).unsqueeze(2).unsqueeze(3) * self.eta/self.regularisation).mean(dim=0)
         ## Compute PnL over the whole path.
 
         # dy : (batch_y, timesteps_y_dyadic-1, d)
