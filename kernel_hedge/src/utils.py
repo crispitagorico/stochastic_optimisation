@@ -3,6 +3,7 @@ from typing import Tuple
 
 
 def augment_with_time(x: torch.Tensor,
+                      T: torch.Tensor = 1.0,
                       grid: torch.Tensor = None) -> torch.Tensor:
     """
     Returns the time augmented (in dimension 0) paths i.e
@@ -20,7 +21,7 @@ def augment_with_time(x: torch.Tensor,
     """
 
     if grid is None:
-        grid = torch.linspace(0, 1, (x.shape[1]))
+        grid = torch.linspace(0, T, (x.shape[1]))
 
     grid = grid.to(x.device.type)
     x_augmented = torch.cat((grid.expand(x.shape[0], -1).unsqueeze(-1), x),
